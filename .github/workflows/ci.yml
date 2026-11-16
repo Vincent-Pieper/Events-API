@@ -2,18 +2,71 @@
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
   pull_request:
-    branches: [main]
+    branches:
+      - main
 
 permissions:
   contents: read
 
 jobs:
-  test:
-    name: Workflow Setup
+  api-tests:
+    name: Build and Test API
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
+
+      - name: Build Docker image
+        run: docker build -t evently-api:ci .
+
+      - name: Start API container
+        run: |
+          docker run -d \
+            --name evently-ci \
+            -p 127.0.0.1:5000:5000 \
+            -e JWT_SECRET_KEY="ci-local-test-secret" \
+            evently-api:ci
+
+      - name: Wait for healthy API
+        run: |
+          for attempt in {1..30}; do
+            if curl -fsS http://127.0.0.1:5000/api/health | grep -q '"status"[[:space:]]*:[[:space:]]*"healthy"'; then
+              echo "API is healthy"
+              exit 0
+            fi
+
+            echo "Waiting for API... ($attempt/30)"
+            sleep 2
+          done
+
+          echo "API health check failed"
+          docker logs evently-ci
+          exit 1
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pytest
+
+      - name: Run API tests
+        env:
+          API_BASE_URL: http://127.0.0.1:5000
+        run: python -m pytest tests/ -v
+
+      - name: Show container logs on failure
+        if: failure()
+        run: docker logs evently-ci || true
+
+      - name: Clean up container
+        if: always()
+        run: docker rm -f evently-ci || true
